@@ -3077,11 +3077,22 @@ fn build_embedded_fonts(
     // Mincho family, Gothic otherwise. The stand-in is looked for where every
     // other shipped face is, so a Mincho document is never handed to whatever
     // sans face the system happens to carry.
+    // TRIAL (FB-04)：报告标准字体（宋体/仿宋/黑体/楷体）优先取本机系统字体文件，
+    // 找不到才回落包内替代字体。匹配同时接受原始字体名与解析后名。
     let system_files: &[(&str, &str)] = &[
         ("MS-Gothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
         ("MS-PGothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
         ("MS-Mincho", "C:\\Windows\\Fonts\\msmincho.ttc"),
         ("MS-PMincho", "C:\\Windows\\Fonts\\msmincho.ttc"),
+        ("宋体", "C:\\Windows\\Fonts\\simsun.ttc"),
+        ("SimSun", "C:\\Windows\\Fonts\\simsun.ttc"),
+        ("仿宋", "C:\\Windows\\Fonts\\simfang.ttf"),
+        ("仿宋_GB2312", "C:\\Windows\\Fonts\\simfang.ttf"),
+        ("FangSong", "C:\\Windows\\Fonts\\simfang.ttf"),
+        ("黑体", "C:\\Windows\\Fonts\\simhei.ttf"),
+        ("SimHei", "C:\\Windows\\Fonts\\simhei.ttf"),
+        ("楷体", "C:\\Windows\\Fonts\\simkai.ttf"),
+        ("KaiTi", "C:\\Windows\\Fonts\\simkai.ttf"),
     ];
     for name in &font_names_used {
         if !is_cjk_family(name) {
@@ -3093,7 +3104,7 @@ fn build_embedded_fonts(
         }
         let system = system_files
             .iter()
-            .find(|(family, _)| *family == resolved)
+            .find(|(family, _)| *family == resolved || *family == name.as_str())
             .map(|(_, path)| std::path::PathBuf::from(path))
             .filter(|path| path.exists());
         let found_path = system.or_else(|| bundled_face_file(oxidocs_fonts::cjk_stand_in(name).1));
@@ -3608,16 +3619,38 @@ fn find_and_subset_cjk_font(used_chars: &std::collections::BTreeSet<char>) -> Op
     // The shipped Gothic is the last resort, so a machine with no Japanese
     // face at all -- a server container, typically -- still draws the text
     // rather than warning and dropping it.
-    let font_path = CJK_FONT_PATHS
-        .iter()
+    // TRIAL (FB-04)：默认 CJK 回退同样系统优先（宋体，再黑体），之后才回落原清单与包内字体。
+    let font_path = std::env::var_os("OXI_CJK_FONT_PATH")
         .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
+        .filter(|p| p.exists())
+        .or_else(|| ["C:\\Windows\\Fonts\\simsun.ttc", "C:\\Windows\\Fonts\\simhei.ttf"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists()))
+        .or_else(|| CJK_FONT_PATHS
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists()))
         .or_else(|| bundled_face_file("OxiGothic.ttf"))?;
     eprintln!("Found CJK font: {}", font_path.display());
     subset_font_file(&font_path.to_string_lossy(), used_chars, "cjk")
 }
 
 fn find_and_subset_cjk_font_bold(used_chars: &std::collections::BTreeSet<char>) -> Option<EmbeddedFont> {
+    // TRIAL HOOK (FB-04 试验，非生产)：粗体同样先读环境变量指定的简体字体。
+    let hooked = ["OXI_CJK_FONT_BOLD_PATH", "OXI_CJK_FONT_PATH"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key))
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+        .or_else(|| {
+            let simhei = std::path::PathBuf::from("C:\\Windows\\Fonts\\simhei.ttf");
+            simhei.exists().then_some(simhei)
+        });
+    if let Some(path) = hooked {
+        eprintln!("Found CJK Bold font (trial hook): {}", path.display());
+        return subset_font_file(&path.to_string_lossy(), used_chars, "cjk-bold");
+    }
     let font_path = CJK_FONT_PATHS_BOLD.iter().find(|p| std::path::Path::new(p).exists())?;
     eprintln!("Found CJK Bold font: {}", font_path);
     // Was a 144-line copy of the subsetter with its own hardcoded scratch
