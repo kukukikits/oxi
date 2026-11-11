@@ -2658,6 +2658,45 @@ const CJK_FONT_PATHS_BOLD: &[&str] = &[
     "/System/Library/Fonts/HiraginoSans-W6.ttc",
 ];
 
+/// Simplified-Chinese system faces, in the order a Chinese report wants them:
+/// 宋体 (the body standard), then 黑体, then Microsoft YaHei, which every Windows 10/11
+/// install carries. Kept apart from `CJK_FONT_PATHS` (the Japanese list) so a Simplified
+/// document is never handed Japanese glyph forms just because a CJK font was found.
+const SC_FONT_PATHS: &[&str] = &[
+    "C:\\Windows\\Fonts\\simsun.ttc",
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\DengXian.ttf",
+];
+
+/// The same for bold: 黑体 first, then YaHei Bold.
+const SC_FONT_PATHS_BOLD: &[&str] = &[
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\msyhbd.ttc",
+];
+
+/// Face shipped in the `fonts/` directory beside this binary (OFL, instanced from
+/// Noto Sans SC). Last resort that still draws Simplified forms on a machine with no
+/// Simplified Chinese font installed at all -- previously such a machine fell through
+/// to the Japanese stand-ins and rendered 简体 with Japanese glyph shapes.
+const SC_BUNDLED_FACE: &str = "NotoSansSC-Regular.ttf";
+
+/// True for the families a Chinese document asks for, by either the name the document
+/// uses or the name the resolver produced.
+fn is_sc_family(base: &str) -> bool {
+    const SC_FAMILIES: &[&str] = &[
+        "宋体", "新宋体", "SimSun", "NSimSun",
+        "黑体", "SimHei",
+        "微软雅黑", "雅黑", "Microsoft YaHei", "YaHei",
+        "仿宋", "仿宋_GB2312", "FangSong",
+        "楷体", "楷体_GB2312", "KaiTi",
+        "等线", "DengXian",
+        "思源黑体", "Source Han Sans SC", "Noto Sans SC",
+    ];
+    let name = base.trim();
+    !name.is_empty() && SC_FAMILIES.iter().any(|family| name.eq_ignore_ascii_case(family))
+}
+
 /// Path to Python3 for font subsetting (requires fonttools)
 const PYTHON3: &str = "python3";
 
@@ -3077,8 +3116,11 @@ fn build_embedded_fonts(
     // Mincho family, Gothic otherwise. The stand-in is looked for where every
     // other shipped face is, so a Mincho document is never handed to whatever
     // sans face the system happens to carry.
-    // TRIAL (FB-04)：报告标准字体（宋体/仿宋/黑体/楷体）优先取本机系统字体文件，
-    // 找不到才回落包内替代字体。匹配同时接受原始字体名与解析后名。
+    // The report's standard Chinese faces map to the machine's own font files, so a
+    // document set in 宋体/仿宋/黑体/楷体/雅黑 draws those faces rather than a Japanese
+    // stand-in. Matching accepts the name the document uses and the resolved name.
+    // A Simplified family with no system file falls back to the shipped Simplified face
+    // (see `SC_BUNDLED_FACE`), never to a Japanese one. 
     let system_files: &[(&str, &str)] = &[
         ("MS-Gothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
         ("MS-PGothic", "C:\\Windows\\Fonts\\msgothic.ttc"),
@@ -3092,7 +3134,14 @@ fn build_embedded_fonts(
         ("黑体", "C:\\Windows\\Fonts\\simhei.ttf"),
         ("SimHei", "C:\\Windows\\Fonts\\simhei.ttf"),
         ("楷体", "C:\\Windows\\Fonts\\simkai.ttf"),
+        ("楷体_GB2312", "C:\\Windows\\Fonts\\simkai.ttf"),
         ("KaiTi", "C:\\Windows\\Fonts\\simkai.ttf"),
+        ("新宋体", "C:\\Windows\\Fonts\\simsun.ttc"),
+        ("NSimSun", "C:\\Windows\\Fonts\\simsun.ttc"),
+        ("微软雅黑", "C:\\Windows\\Fonts\\msyh.ttc"),
+        ("Microsoft YaHei", "C:\\Windows\\Fonts\\msyh.ttc"),
+        ("等线", "C:\\Windows\\Fonts\\DengXian.ttf"),
+        ("DengXian", "C:\\Windows\\Fonts\\DengXian.ttf"),
     ];
     for name in &font_names_used {
         if !is_cjk_family(name) {
@@ -3107,7 +3156,15 @@ fn build_embedded_fonts(
             .find(|(family, _)| *family == resolved || *family == name.as_str())
             .map(|(_, path)| std::path::PathBuf::from(path))
             .filter(|path| path.exists());
-        let found_path = system.or_else(|| bundled_face_file(oxidocs_fonts::cjk_stand_in(name).1));
+        let found_path = system
+            .or_else(|| {
+                // Simplified family with no system file: the shipped Simplified face
+                // comes first, so 简体 is never rendered with Japanese glyph forms.
+                (is_sc_family(name) || is_sc_family(&resolved))
+                    .then(|| bundled_face_file(SC_BUNDLED_FACE))
+                    .flatten()
+            })
+            .or_else(|| bundled_face_file(oxidocs_fonts::cjk_stand_in(name).1));
         let label = resolved.replace(['-', ' '], "_");
         if let Some(path) = found_path {
             if let Some(result) = subset_font_file(&path.to_string_lossy(), &used_chars, &label) {
@@ -3619,14 +3676,17 @@ fn find_and_subset_cjk_font(used_chars: &std::collections::BTreeSet<char>) -> Op
     // The shipped Gothic is the last resort, so a machine with no Japanese
     // face at all -- a server container, typically -- still draws the text
     // rather than warning and dropping it.
-    // TRIAL (FB-04)：默认 CJK 回退同样系统优先（宋体，再黑体），之后才回落原清单与包内字体。
+    // Default CJK face: the machine's Simplified faces first (宋体 → 黑体 → 雅黑 → 等线),
+    // then the shipped Simplified face, then the Japanese system list, and only last the
+    // shipped Japanese gothic. An explicit OXI_CJK_FONT_PATH still wins, for measurement.
     let font_path = std::env::var_os("OXI_CJK_FONT_PATH")
         .map(std::path::PathBuf::from)
         .filter(|p| p.exists())
-        .or_else(|| ["C:\\Windows\\Fonts\\simsun.ttc", "C:\\Windows\\Fonts\\simhei.ttf"]
+        .or_else(|| SC_FONT_PATHS
             .iter()
             .map(std::path::PathBuf::from)
             .find(|p| p.exists()))
+        .or_else(|| bundled_face_file(SC_BUNDLED_FACE))
         .or_else(|| CJK_FONT_PATHS
             .iter()
             .map(std::path::PathBuf::from)
@@ -3637,27 +3697,27 @@ fn find_and_subset_cjk_font(used_chars: &std::collections::BTreeSet<char>) -> Op
 }
 
 fn find_and_subset_cjk_font_bold(used_chars: &std::collections::BTreeSet<char>) -> Option<EmbeddedFont> {
-    // TRIAL HOOK (FB-04 试验，非生产)：粗体同样先读环境变量指定的简体字体。
-    let hooked = ["OXI_CJK_FONT_BOLD_PATH", "OXI_CJK_FONT_PATH"]
-        .iter()
-        .filter_map(|key| std::env::var_os(key))
+    // Bold CJK follows the same order as the regular face: the machine's bold
+    // Simplified face (黑体 → YaHei Bold), then the shipped Simplified face, then the
+    // Japanese bold list. An explicit OXI_CJK_FONT_BOLD_PATH wins, for measurement.
+    let font_path = std::env::var_os("OXI_CJK_FONT_BOLD_PATH")
         .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
-        .or_else(|| {
-            let simhei = std::path::PathBuf::from("C:\\Windows\\Fonts\\simhei.ttf");
-            simhei.exists().then_some(simhei)
-        });
-    if let Some(path) = hooked {
-        eprintln!("Found CJK Bold font (trial hook): {}", path.display());
-        return subset_font_file(&path.to_string_lossy(), used_chars, "cjk-bold");
-    }
-    let font_path = CJK_FONT_PATHS_BOLD.iter().find(|p| std::path::Path::new(p).exists())?;
-    eprintln!("Found CJK Bold font: {}", font_path);
+        .filter(|p| p.exists())
+        .or_else(|| SC_FONT_PATHS_BOLD
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists()))
+        .or_else(|| bundled_face_file(SC_BUNDLED_FACE))
+        .or_else(|| CJK_FONT_PATHS_BOLD
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|p| p.exists()))?;
+    eprintln!("Found CJK Bold font: {}", font_path.display());
     // Was a 144-line copy of the subsetter with its own hardcoded scratch
     // paths and no way out when the subsetter was missing, so bold CJK text
     // simply vanished on a machine without fontTools -- and on Windows the
     // "/tmp/..." it wrote to means C:	mp\, which need not exist at all.
-    subset_font_file(font_path, used_chars, "cjk-bold")
+    subset_font_file(&font_path.to_string_lossy(), used_chars, "cjk-bold")
 }
 
 /// Fallback: load the full font without subsetting.
