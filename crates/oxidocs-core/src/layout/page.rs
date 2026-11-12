@@ -9847,7 +9847,20 @@ old_page={} chain_advance={:.1} chain_min_y={:.1} new_top={:.1} fresh_bottom={:.
                             *v = img_y;
                         }
                     }
-                    let img_x = if !self.doc_body_has_real_cjk
+                    // FB-06 (2026-11-12, default ON, opt-out OXI_BODY_IMAGE_ALIGNMENT_CJK_DISABLE):
+                    // body inline-image alignment was scoped `!doc_body_has_real_cjk` because the
+                    // rule was only ever proven on the Japanese/Latin corpus. Word does not scope
+                    // this way: in YBStudio's Chinese certificate report (one untouched DOCX, real
+                    // Word 16.0 vs this engine, 22 inline images, 0 anchors), all 7 body images
+                    // centred by `<w:pStyle w:val="YBW-证照图像"/>` (style-level `w:jc center`) draw
+                    // centred in Word within 0.1pt while this engine put every one of them flush
+                    // at the left margin (offsets -9.4..-122.7pt) at an identical page count
+                    // (17=17). `doc_body_has_real_cjk` is a whole-document scan, so a single Han
+                    // paragraph anywhere used to strip alignment from every body image. Same
+                    // precedent as S-LATCJK (layout/mod.rs:125): that gate was a SCOPE, not the
+                    // rule. The CJK scope now opens by default; `_DISABLE` restores it.
+                    let img_x = if (!self.doc_body_has_real_cjk
+                        || !crate::env_flag!("OXI_BODY_IMAGE_ALIGNMENT_CJK_DISABLE"))
                         && !crate::env_flag!("OXI_BODY_IMAGE_ALIGNMENT_DISABLE") {
                         img.host_paragraph.as_deref().map_or(start_x, |host| {
                             let left = host.style.indent_left.unwrap_or(0.0)
